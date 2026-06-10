@@ -43,6 +43,14 @@ public class MotionVisualOverlay : MonoBehaviour
     public VirtualCoachClient aiClient;
     public string practiceGenre = "伝統工芸の動作";
 
+    [Header("5. 動き出し同期設定")]
+    [Tooltip("動き出しを検知して同期をスタートするかどうか")]
+    public bool syncStartOnMovement = true;
+    [Tooltip("動き出しと判定する移動量（メートル）")]
+    public float movementThreshold = 0.03f; 
+    [Tooltip("【重要】シーン開始・リセット直後のIK瞬間移動を無視する時間（秒）")]
+    public float standbyDelay = 1.0f;
+
     private HumanBodyBones[] allBones;
     private readonly HumanBodyBones[] trailBones = new HumanBodyBones[]
     {
@@ -73,6 +81,10 @@ public class MotionVisualOverlay : MonoBehaviour
     private float maxRecordedTime = 0f;   
     private bool isPaused = false;        
     
+    private bool hasStarted = false;
+    private Dictionary<Transform, Vector3> initialPositions = new Dictionary<Transform, Vector3>();
+    private float standbyTimer = 0f; // 🌟追加：安定待ちタイマー
+
     private float currentAverageError = 0f;
     private string worstBoneName = "未特定";
     private float worstBoneError = 0f;
@@ -109,7 +121,54 @@ public class MotionVisualOverlay : MonoBehaviour
         SetupTrails(successorAvatar, new Color(1f, 0.2f, 0.2f, 0.8f)); 
         SetupTrails(craftmanAvatar, new Color(0.2f, 0.6f, 1f, 0.8f));  
 
+        if (syncStartOnMovement)
+        {
+            isPaused = false; 
+            hasStarted = false;
+            standbyTimer = 0f; // 🌟タイマーリセット
+        }
+        else
+        {
+            hasStarted = true; 
+        }
+
         StartCoroutine(EndOfFrameLoop());
+    }
+
+    private void RecordInitialPositions()
+    {
+        initialPositions.Clear();
+        foreach (var boneElement in targetBones)
+        {
+            if (boneElement.isActive && boneElement.successorBone != null)
+            {
+                initialPositions[boneElement.successorBone] = boneElement.successorBone.position;
+            }
+        }
+    }
+
+    private void ResetStandby()
+    {
+        isPaused = false;
+        hasStarted = !syncStartOnMovement;
+        virtualTime = 0f;
+        maxRecordedTime = 0f;
+        poseHistory.Clear();
+        ClearAllTrails();
+        currentAverageError = 0f;
+        lastAssignedSpeed = -1f;
+        standbyTimer = 0f; // 🌟リセット時もタイマーをゼロに戻して安定待ちする
+
+        if (craftmanAvatar != null)
+        {
+            craftmanAvatar.Rebind();
+            craftmanAvatar.speed = 0f;
+        }
+        if (craftmanGhost != null)
+        {
+            craftmanGhost.Rebind();
+            craftmanGhost.speed = 0f;
+        }
     }
 
     private void ApplyGhostMaterial(Animator ghostAnim)
@@ -145,6 +204,32 @@ public class MotionVisualOverlay : MonoBehaviour
     {
         if (successorAvatar == null || craftmanAvatar == null) return;
 
+        if (syncStartOnMovement && !hasStarted)
+        {
+            if (craftmanAvatar) craftmanAvatar.speed = 0f;
+            if (craftmanGhost) craftmanGhost.speed = 0f;
+            if (successorAvatar) successorAvatar.speed = 1f;
+            if (successorGhost) successorGhost.speed = 1f;
+            
+            // 🌟追加：指定した時間が経過するまでは、初期位置を常に上書きしてトラッカーの安定を待つ
+            if (standbyTimer < standbyDelay)
+            {
+                standbyTimer += Time.deltaTime;
+                RecordInitialPositions();
+                return; // この間は動きの判定を行わない
+            }
+
+            if (DetectMovement())
+            {
+                hasStarted = true;
+                lastAssignedSpeed = -1f; 
+            }
+            else
+            {
+                return; 
+            }
+        }
+
         if (isPaused)
         {
             SetAnimatorsSpeed(0f);
@@ -169,9 +254,22 @@ public class MotionVisualOverlay : MonoBehaviour
                 RecordPoseSnapshot(virtualTime);
             }
         }
+    }
 
-        // 🌟 修正：リアルタイム再生中の位置・回転の強制上書き処理（相互干渉の原因）を完全に撤去しました。
-        // これにより、すべてのアバターは完全に独立した配置・動きをキープします。
+    private bool DetectMovement()
+    {
+        if (initialPositions.Count == 0) return true; 
+
+        foreach (var kvp in initialPositions)
+        {
+            if (kvp.Key == null) continue;
+            
+            if (Vector3.Distance(kvp.Key.position, kvp.Value) > movementThreshold)
+            {
+                return true; 
+            }
+        }
+        return false;
     }
 
     private IEnumerator EndOfFrameLoop()
@@ -179,7 +277,7 @@ public class MotionVisualOverlay : MonoBehaviour
         while (true)
         {
             yield return new WaitForEndOfFrame();
-            if (!isPaused) CalculateAverageError();
+            if (!isPaused && hasStarted) CalculateAverageError();
         }
     }
 
@@ -329,7 +427,6 @@ public class MotionVisualOverlay : MonoBehaviour
 
             if (bS != null && bC != null)
             {
-                // 各アバター自体のルート回転を考慮して、純粋な骨同士のズレを計算
                 Quaternion charRotS = Quaternion.Inverse(successorAvatar.transform.rotation) * bS.rotation;
                 Quaternion charRotC = Quaternion.Inverse(craftmanAvatar.transform.rotation) * bC.rotation;
                 
@@ -359,18 +456,44 @@ public class MotionVisualOverlay : MonoBehaviour
         Color timelineColor = Color.Lerp(Color.green, Color.red, errorNormalized);
         if (currentAverageError < 5f) timelineColor = Color.gray; 
 
-        int width = 450; int height = 230; 
+        int width = 450; int height = 260; 
         GUILayout.BeginArea(new Rect(Screen.width - width - 20, Screen.height - height - 20, width, height), timelineBoxStyle);
         
         Color originalColor = GUI.backgroundColor;
-        GUI.backgroundColor = timelineColor;
+        
+        GUILayout.BeginHorizontal();
+        if (syncStartOnMovement && !hasStarted)
+        {
+            // 🌟UIもわかりやすく「準備中」と「待機中」で色分け
+            if (standbyTimer < standbyDelay)
+            {
+                GUI.backgroundColor = new Color(0.5f, 0.5f, 0.5f); 
+                GUILayout.Button("🔄 IK安定化待ち...", GUILayout.Width(150), GUILayout.Height(30));
+            }
+            else
+            {
+                GUI.backgroundColor = new Color(1f, 0.7f, 0f); 
+                GUILayout.Button("⏳ 動き出し待機中...", GUILayout.Width(150), GUILayout.Height(30));
+            }
+        }
+        else
+        {
+            GUI.backgroundColor = timelineColor;
+            string btnText = isPaused ? "▶ 再生 (Play)" : "⏸ 一時停止 (Pause)";
+            if (GUILayout.Button(btnText, GUILayout.Width(150), GUILayout.Height(30))) isPaused = !isPaused;
+        }
+
+        GUI.backgroundColor = new Color(0.8f, 0.8f, 0.8f);
+        if (GUILayout.Button("🔄 リセット(待機へ)", GUILayout.Width(130), GUILayout.Height(30)))
+        {
+            ResetStandby();
+        }
+        GUI.backgroundColor = originalColor;
+        GUILayout.EndHorizontal();
+
+        GUILayout.Space(5);
 
         GUILayout.BeginHorizontal();
-        string btnText = isPaused ? "▶ 再生 (Play)" : "⏸ 一時停止 (Pause)";
-        if (GUILayout.Button(btnText, GUILayout.Width(150), GUILayout.Height(30))) isPaused = !isPaused;
-        
-        GUI.backgroundColor = originalColor; 
-
         GUIStyle labelStyle = new GUIStyle(GUI.skin.label) { richText = true, fontStyle = FontStyle.Bold, fontSize = 14 };
         GUILayout.Label(" <b>再生速度:</b> " + playSpeed.ToString("F1") + "x  |  <b>平均ズレ:</b> <color=yellow>" + currentAverageError.ToString("F1") + "°</color>", labelStyle);
         GUILayout.EndHorizontal();
@@ -417,7 +540,7 @@ public class MotionVisualOverlay : MonoBehaviour
             if (aiClient != null)
             {
                 isPaused = true;
-                string strictJapaneseGenre = practiceGenre + "（※注意：必ずすべて日本語で親しみやすく回答してください。英語などの外国語や絵文字・顔文字は絶対に使用しないでください。また、動きの遅れや早さなどの「タイミングのズレ（〇秒など）」については一切言ねず、「角度やポーズのズレ」についてのみアドバイスをしてください。）";
+                string strictJapaneseGenre = practiceGenre + "（※注意：必ずすべて日本語で親しみやすく回答してください。英語などの外国語や絵文字・顔文字は絶対に使用しないでください。また、動きの遅れや早さなどの「タイミングのズレ（〇秒など）」については一切言及せず、「角度やポーズのズレ」についてのみアドバイスをしてください。）";
                 aiClient.RequestAdviceFromOutside(strictJapaneseGenre, worstBoneName, Mathf.Round(worstBoneError * 10.0f) / 10.0f, virtualTime);
             }
             else
