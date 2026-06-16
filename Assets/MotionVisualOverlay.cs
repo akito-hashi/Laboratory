@@ -10,13 +10,11 @@ public class MotionVisualOverlay : MonoBehaviour
         [Tooltip("チェックを入れると、この骨のズレを計算対象に含めます")]
         public bool isActive = true;
         public string boneNameJP;   
-        [Tooltip("画面上で実際に動いている「新規」アバターの骨オブジェクト")]
         public Transform successorBone;
-        [Tooltip("画面上で実際に動いている「職人」アバターの骨オブジェクト")]
         public Transform craftmanBone;
     }
 
-    [Header("【最重要】ズレを計算したい骨のオブジェクトを登録してください（チェックボックスでON/OFF可能）")]
+    [Header("【最重要】ズレを計算したい骨のオブジェクトを登録してください")]
     public List<TrackedBone> targetBones = new List<TrackedBone>();
 
     [Header("【表示用アバター】（シークバー・軌跡用）")]
@@ -37,18 +35,18 @@ public class MotionVisualOverlay : MonoBehaviour
 
     [Header("3. タイムライン・感度設定")]
     [Range(0.1f, 2f)] public float playSpeed = 1.0f;
+    [Tooltip("位置ズレの最大許容値（センチメートル単位）")]
     public float maxErrorThreshold = 30f;
 
     [Header("4. AIコーチ連携")]
     public VirtualCoachClient aiClient;
-    public string practiceGenre = "伝統工芸の動作";
+    public string practiceGenre = "バスケットボールのフリースロー";
+    [Tooltip("チェックを入れると、AIコーチの回答を音声で読み上げます")]
+    public bool enableVoiceReading = true; 
 
     [Header("5. 動き出し同期設定")]
-    [Tooltip("動き出しを検知して同期をスタートするかどうか")]
     public bool syncStartOnMovement = true;
-    [Tooltip("動き出しと判定する移動量（メートル）")]
     public float movementThreshold = 0.03f; 
-    [Tooltip("【重要】シーン開始・リセット直後のIK瞬間移動を無視する時間（秒）")]
     public float standbyDelay = 1.0f;
 
     private HumanBodyBones[] allBones;
@@ -64,15 +62,12 @@ public class MotionVisualOverlay : MonoBehaviour
         public Quaternion[] rotationsCraftman;
         public Quaternion[] rotationsSuccessorGhost;
         public Quaternion[] rotationsCraftmanGhost;
-
         public Vector3[] positionsSuccessor;
         public Vector3[] positionsCraftman;
         public Vector3[] positionsSuccessorGhost;
         public Vector3[] positionsCraftmanGhost;
-
         public Vector3 rootPosSuccessor, rootPosCraftman, rootPosSuccessorGhost, rootPosCraftmanGhost;
         public Quaternion rootRotSuccessor, rootRotCraftman, rootRotSuccessorGhost, rootRotCraftmanGhost;
-        
         public float averageError; 
     }
 
@@ -80,19 +75,20 @@ public class MotionVisualOverlay : MonoBehaviour
     private float virtualTime = 0f;       
     private float maxRecordedTime = 0f;   
     private bool isPaused = false;        
-    
     private bool hasStarted = false;
     private Dictionary<Transform, Vector3> initialPositions = new Dictionary<Transform, Vector3>();
-    private float standbyTimer = 0f; // 🌟追加：安定待ちタイマー
-
-    private float currentAverageError = 0f;
+    private float standbyTimer = 0f; 
+    private float currentAverageError = 0f; 
+    
     private string worstBoneName = "未特定";
-    private float worstBoneError = 0f;
+    private float worstBoneError = 0f;       
+    private float worstBoneCurrentAngle = 0f; 
 
     private Material ghostMaterial;
     private Dictionary<Renderer, Material[]> originalMaterials = new Dictionary<Renderer, Material[]>();
     private List<Material> createdMaterials = new List<Material>();
     private float lastAssignedSpeed = -1f;
+    private Vector2 jsonScrollPos = Vector2.zero;
 
     void Start()
     {
@@ -121,16 +117,8 @@ public class MotionVisualOverlay : MonoBehaviour
         SetupTrails(successorAvatar, new Color(1f, 0.2f, 0.2f, 0.8f)); 
         SetupTrails(craftmanAvatar, new Color(0.2f, 0.6f, 1f, 0.8f));  
 
-        if (syncStartOnMovement)
-        {
-            isPaused = false; 
-            hasStarted = false;
-            standbyTimer = 0f; // 🌟タイマーリセット
-        }
-        else
-        {
-            hasStarted = true; 
-        }
+        if (syncStartOnMovement) { isPaused = false; hasStarted = false; standbyTimer = 0f; }
+        else { hasStarted = true; }
 
         StartCoroutine(EndOfFrameLoop());
     }
@@ -141,34 +129,16 @@ public class MotionVisualOverlay : MonoBehaviour
         foreach (var boneElement in targetBones)
         {
             if (boneElement.isActive && boneElement.successorBone != null)
-            {
                 initialPositions[boneElement.successorBone] = boneElement.successorBone.position;
-            }
         }
     }
 
     private void ResetStandby()
     {
-        isPaused = false;
-        hasStarted = !syncStartOnMovement;
-        virtualTime = 0f;
-        maxRecordedTime = 0f;
-        poseHistory.Clear();
-        ClearAllTrails();
-        currentAverageError = 0f;
-        lastAssignedSpeed = -1f;
-        standbyTimer = 0f; // 🌟リセット時もタイマーをゼロに戻して安定待ちする
-
-        if (craftmanAvatar != null)
-        {
-            craftmanAvatar.Rebind();
-            craftmanAvatar.speed = 0f;
-        }
-        if (craftmanGhost != null)
-        {
-            craftmanGhost.Rebind();
-            craftmanGhost.speed = 0f;
-        }
+        isPaused = false; hasStarted = !syncStartOnMovement; virtualTime = 0f; maxRecordedTime = 0f;
+        poseHistory.Clear(); ClearAllTrails(); currentAverageError = 0f; lastAssignedSpeed = -1f; standbyTimer = 0f; 
+        if (craftmanAvatar) { craftmanAvatar.Rebind(); craftmanAvatar.speed = 0f; }
+        if (craftmanGhost) { craftmanGhost.Rebind(); craftmanGhost.speed = 0f; }
     }
 
     private void ApplyGhostMaterial(Animator ghostAnim)
@@ -211,23 +181,12 @@ public class MotionVisualOverlay : MonoBehaviour
             if (successorAvatar) successorAvatar.speed = 1f;
             if (successorGhost) successorGhost.speed = 1f;
             
-            // 🌟追加：指定した時間が経過するまでは、初期位置を常に上書きしてトラッカーの安定を待つ
             if (standbyTimer < standbyDelay)
             {
-                standbyTimer += Time.deltaTime;
-                RecordInitialPositions();
-                return; // この間は動きの判定を行わない
+                standbyTimer += Time.deltaTime; RecordInitialPositions(); return; 
             }
-
-            if (DetectMovement())
-            {
-                hasStarted = true;
-                lastAssignedSpeed = -1f; 
-            }
-            else
-            {
-                return; 
-            }
+            if (DetectMovement()) { hasStarted = true; lastAssignedSpeed = -1f; }
+            else return;
         }
 
         if (isPaused)
@@ -239,19 +198,14 @@ public class MotionVisualOverlay : MonoBehaviour
         {
             if (virtualTime < maxRecordedTime - 0.01f)
             {
-                SetAnimatorsSpeed(0f);
-                virtualTime += Time.deltaTime * playSpeed;
+                SetAnimatorsSpeed(0f); virtualTime += Time.deltaTime * playSpeed;
                 if (virtualTime > maxRecordedTime) virtualTime = maxRecordedTime;
                 ApplyPoseAtTime(virtualTime);
             }
             else
             {
-                virtualTime += Time.deltaTime * playSpeed;
-                maxRecordedTime = virtualTime;
-                SetAnimatorsSpeed(playSpeed);
-                
-                CalculateAverageError();
-                RecordPoseSnapshot(virtualTime);
+                virtualTime += Time.deltaTime * playSpeed; maxRecordedTime = virtualTime;
+                SetAnimatorsSpeed(playSpeed); CalculateAverageError(); RecordPoseSnapshot(virtualTime);
             }
         }
     }
@@ -259,15 +213,9 @@ public class MotionVisualOverlay : MonoBehaviour
     private bool DetectMovement()
     {
         if (initialPositions.Count == 0) return true; 
-
         foreach (var kvp in initialPositions)
         {
-            if (kvp.Key == null) continue;
-            
-            if (Vector3.Distance(kvp.Key.position, kvp.Value) > movementThreshold)
-            {
-                return true; 
-            }
+            if (kvp.Key != null && Vector3.Distance(kvp.Key.position, kvp.Value) > movementThreshold) return true; 
         }
         return false;
     }
@@ -300,12 +248,10 @@ public class MotionVisualOverlay : MonoBehaviour
             rotationsCraftman = new Quaternion[allBones.Length],
             rotationsSuccessorGhost = new Quaternion[allBones.Length],
             rotationsCraftmanGhost = new Quaternion[allBones.Length],
-
             positionsSuccessor = new Vector3[allBones.Length],
             positionsCraftman = new Vector3[allBones.Length],
             positionsSuccessorGhost = new Vector3[allBones.Length],
             positionsCraftmanGhost = new Vector3[allBones.Length],
-
             rootPosSuccessor = successorAvatar.transform.position,
             rootPosCraftman = craftmanAvatar.transform.position,
             rootPosSuccessorGhost = successorGhost ? successorGhost.transform.position : Vector3.zero,
@@ -314,7 +260,6 @@ public class MotionVisualOverlay : MonoBehaviour
             rootRotCraftman = craftmanAvatar.transform.rotation,
             rootRotSuccessorGhost = successorGhost ? successorGhost.transform.rotation : Quaternion.identity,
             rootRotCraftmanGhost = craftmanGhost ? craftmanGhost.transform.rotation : Quaternion.identity,
-            
             averageError = currentAverageError 
         };
 
@@ -329,7 +274,6 @@ public class MotionVisualOverlay : MonoBehaviour
             snapshot.rotationsCraftman[i] = bC != null ? bC.localRotation : Quaternion.identity;
             snapshot.rotationsSuccessorGhost[i] = bSG != null ? bSG.localRotation : Quaternion.identity;
             snapshot.rotationsCraftmanGhost[i] = bCG != null ? bCG.localRotation : Quaternion.identity;
-
             snapshot.positionsSuccessor[i] = bS != null ? bS.localPosition : Vector3.zero;
             snapshot.positionsCraftman[i] = bC != null ? bC.localPosition : Vector3.zero;
             snapshot.positionsSuccessorGhost[i] = bSG != null ? bSG.localPosition : Vector3.zero;
@@ -338,6 +282,7 @@ public class MotionVisualOverlay : MonoBehaviour
         poseHistory.Add(snapshot);
     }
 
+    // 🌟シークバー移動時に強制再計算を走らせる修正を適用
     private void ApplyPoseAtTime(float time)
     {
         if (poseHistory.Count < 10) return;
@@ -355,13 +300,11 @@ public class MotionVisualOverlay : MonoBehaviour
         }
 
         PoseSnapshot closest = poseHistory[closestIndex];
-        successorAvatar.transform.position = closest.rootPosSuccessor;
-        successorAvatar.transform.rotation = closest.rootRotSuccessor;
-        craftmanAvatar.transform.position = closest.rootPosCraftman;
-        craftmanAvatar.transform.rotation = closest.rootRotCraftman;
+        successorAvatar.transform.position = closest.rootPosSuccessor; successorAvatar.transform.rotation = closest.rootRotSuccessor;
+        craftmanAvatar.transform.position = closest.rootPosCraftman; craftmanAvatar.transform.rotation = closest.rootRotCraftman;
 
-        if (successorGhost != null) { successorGhost.transform.position = closest.rootPosSuccessorGhost; successorGhost.transform.rotation = closest.rootRotSuccessorGhost; }
-        if (craftmanGhost != null) { craftmanGhost.transform.position = closest.rootPosCraftmanGhost; craftmanGhost.transform.rotation = closest.rootRotCraftmanGhost; }
+        if (successorGhost) { successorGhost.transform.position = closest.rootPosSuccessorGhost; successorGhost.transform.rotation = closest.rootRotSuccessorGhost; }
+        if (craftmanGhost) { craftmanGhost.transform.position = closest.rootPosCraftmanGhost; craftmanGhost.transform.rotation = closest.rootRotCraftmanGhost; }
 
         for (int i = 0; i < allBones.Length; i++)
         {
@@ -370,196 +313,229 @@ public class MotionVisualOverlay : MonoBehaviour
             Transform bSG = successorGhost ? successorGhost.GetBoneTransform(allBones[i]) : null;
             Transform bCG = craftmanGhost ? craftmanGhost.GetBoneTransform(allBones[i]) : null;
 
-            if (bS != null) { bS.localRotation = closest.rotationsSuccessor[i]; bS.localPosition = closest.positionsSuccessor[i]; }
-            if (bC != null) { bC.localRotation = closest.rotationsCraftman[i]; bC.localPosition = closest.positionsCraftman[i]; }
-            if (bSG != null) { bSG.localRotation = closest.rotationsSuccessorGhost[i]; bSG.localPosition = closest.positionsSuccessorGhost[i]; }
-            if (bCG != null) { bCG.localRotation = closest.rotationsCraftmanGhost[i]; bCG.localPosition = closest.positionsCraftmanGhost[i]; }
+            if (bS) { bS.localRotation = closest.rotationsSuccessor[i]; bS.localPosition = closest.positionsSuccessor[i]; }
+            if (bC) { bC.localRotation = closest.rotationsCraftman[i]; bC.localPosition = closest.positionsCraftman[i]; }
+            if (bSG) { bSG.localRotation = closest.rotationsSuccessorGhost[i]; bSG.localPosition = closest.positionsSuccessorGhost[i]; }
+            if (bCG) { bCG.localRotation = closest.rotationsCraftmanGhost[i]; bCG.localPosition = closest.positionsCraftmanGhost[i]; }
         }
+
+        // 🌟ここで再計算を走らせることで、シークバー巻き戻し時もUI数値が完全連動
+        CalculateAverageError();
     }
 
     private void JumpToWorstMoment()
     {
         if (poseHistory.Count == 0) return;
-
-        float maxErr = -1f;
-        float targetTime = 0f;
-
+        float maxErr = -1f; float targetTime = 0f;
         foreach (var snap in poseHistory)
         {
-            if (snap.averageError > maxErr)
-            {
-                maxErr = snap.averageError;
-                targetTime = snap.timeStamp;
-            }
+            if (snap.averageError > maxErr) { maxErr = snap.averageError; targetTime = snap.timeStamp; }
         }
-
-        virtualTime = targetTime;
-        isPaused = true;
-        ClearAllTrails();
-        ApplyPoseAtTime(virtualTime);
-        CalculateAverageError(); 
+        virtualTime = targetTime; isPaused = true; ClearAllTrails(); ApplyPoseAtTime(virtualTime); 
     }
 
     private void ClearAllTrails()
     {
         foreach (var bone in trailBones)
         {
-            Transform bS = successorAvatar.GetBoneTransform(bone);
-            Transform bC = craftmanAvatar.GetBoneTransform(bone);
-            if (bS != null) { var t = bS.GetComponent<TrailRenderer>(); if (t != null) t.Clear(); }
-            if (bC != null) { var t = bC.GetComponent<TrailRenderer>(); if (t != null) t.Clear(); }
+            Transform bS = successorAvatar.GetBoneTransform(bone); Transform bC = craftmanAvatar.GetBoneTransform(bone);
+            if (bS) { var t = bS.GetComponent<TrailRenderer>(); if (t) t.Clear(); }
+            if (bC) { var t = bC.GetComponent<TrailRenderer>(); if (t) t.Clear(); }
         }
     }
 
     private void CalculateAverageError()
     {
-        float totalError = 0f;
-        int count = 0;
-        worstBoneError = 0f;
+        float totalError = 0f; int count = 0; worstBoneError = 0f;
 
         for (int i = 0; i < targetBones.Count; i++)
         {
             TrackedBone boneElement = targetBones[i];
             if (!boneElement.isActive) continue;
 
-            Transform bS = boneElement.successorBone;
-            Transform bC = boneElement.craftmanBone;
-
+            Transform bS = boneElement.successorBone; Transform bC = boneElement.craftmanBone;
             if (bS != null && bC != null)
             {
-                Quaternion charRotS = Quaternion.Inverse(successorAvatar.transform.rotation) * bS.rotation;
-                Quaternion charRotC = Quaternion.Inverse(craftmanAvatar.transform.rotation) * bC.rotation;
+                Vector3 localPosS = successorAvatar.transform.InverseTransformPoint(bS.position);
+                Vector3 localPosC = craftmanAvatar.transform.InverseTransformPoint(bC.position);
                 
-                float worldAngleDiff = Quaternion.Angle(charRotS, charRotC);
-                float localAngleDiff = Quaternion.Angle(bS.localRotation, bC.localRotation);
-                
-                float angleDiff = Mathf.Max(worldAngleDiff, localAngleDiff);
+                float distanceDiff = Vector3.Distance(localPosS, localPosC) * 100f;
 
-                totalError += angleDiff;
-                count++;
-
-                if (angleDiff > worstBoneError)
-                {
-                    worstBoneError = angleDiff;
+                totalError += distanceDiff; count++;
+                if (distanceDiff > worstBoneError) 
+                { 
+                    worstBoneError = distanceDiff; 
                     worstBoneName = boneElement.boneNameJP;
+                    worstBoneCurrentAngle = Quaternion.Angle(Quaternion.identity, bS.localRotation); 
                 }
             }
         }
-        
         currentAverageError = count > 0 ? totalError / count : 0f;
+    }
+
+    private string DetermineMotionPhase(float time)
+    {
+        if (time < 0.8f) return "セットアップ（構え）";
+        if (time < 1.6f) return "フォワードスイング（振りかぶり）";
+        return "リリース（ボールを離す直前）";
+    }
+
+    private string GenerateCoachJson(bool prettyPrint)
+    {
+        string voiceInstruction = enableVoiceReading ? "（※音声読み上げを行うため、改行は使わず、100文字以内の流暢な一文の日本語で簡潔にアドバイスしてください）" : "（※注意：必ずすべて日本語で回答してください。外国語や絵文字は絶対に使用しないでください。ポーズのズレについて短く指導してください。）";
+        string strictInstruction = practiceGenre + voiceInstruction;
+
+        AICoachRequestJSON requestData = new AICoachRequestJSON
+        {
+            task_info = new TaskInfo {
+                genre = strictInstruction,
+                motion_phase = DetermineMotionPhase(virtualTime),
+                speed_ratio = Mathf.Round(playSpeed * 10f) / 10f
+            },
+            posture_analysis = new PostureAnalysis {
+                average_error = Mathf.Round(currentAverageError * 10f) / 10f,
+                critical_error_bone = worstBoneName,
+                critical_error_angle = Mathf.Round(worstBoneError * 10f) / 10f, 
+                critical_learner_absolute_angle = Mathf.Round(worstBoneCurrentAngle * 10f) / 10f, 
+                all_bones_data = new List<AIBoneData>()
+            }
+        };
+
+        foreach (var boneElement in targetBones)
+        {
+            if (!boneElement.isActive || boneElement.successorBone == null || boneElement.craftmanBone == null) continue;
+
+            Vector3 localPosS = successorAvatar.transform.InverseTransformPoint(boneElement.successorBone.position);
+            Vector3 localPosC = craftmanAvatar.transform.InverseTransformPoint(boneElement.craftmanBone.position);
+            float distanceDiff = Vector3.Distance(localPosS, localPosC) * 100f;
+            float currentAbsAngle = Quaternion.Angle(Quaternion.identity, boneElement.successorBone.localRotation);
+
+            requestData.posture_analysis.all_bones_data.Add(new AIBoneData {
+                boneName = boneElement.boneNameJP,
+                errorAngle = Mathf.Round(distanceDiff * 10f) / 10f, 
+                currentAngle = Mathf.Round(currentAbsAngle * 10f) / 10f 
+            });
+        }
+
+        return JsonUtility.ToJson(requestData, prettyPrint);
     }
 
     void OnGUI()
     {
         GUIStyle timelineBoxStyle = new GUIStyle(GUI.skin.box);
-        float errorNormalized = Mathf.InverseLerp(0f, maxErrorThreshold, currentAverageError);
-        Color timelineColor = Color.Lerp(Color.green, Color.red, errorNormalized);
-        if (currentAverageError < 5f) timelineColor = Color.gray; 
+        Color timelineColor = Color.Lerp(Color.green, Color.red, Mathf.InverseLerp(0f, maxErrorThreshold, currentAverageError));
+        if (currentAverageError < 2f) timelineColor = Color.gray; 
 
-        int width = 450; int height = 260; 
-        GUILayout.BeginArea(new Rect(Screen.width - width - 20, Screen.height - height - 20, width, height), timelineBoxStyle);
+        int width = 450; 
+        int height = isPaused ? 565 : 285; 
         
+        GUILayout.BeginArea(new Rect(Screen.width - width - 20, Screen.height - height - 20, width, height), timelineBoxStyle);
         Color originalColor = GUI.backgroundColor;
         
         GUILayout.BeginHorizontal();
         if (syncStartOnMovement && !hasStarted)
         {
-            // 🌟UIもわかりやすく「準備中」と「待機中」で色分け
-            if (standbyTimer < standbyDelay)
-            {
-                GUI.backgroundColor = new Color(0.5f, 0.5f, 0.5f); 
-                GUILayout.Button("🔄 IK安定化待ち...", GUILayout.Width(150), GUILayout.Height(30));
-            }
-            else
-            {
-                GUI.backgroundColor = new Color(1f, 0.7f, 0f); 
-                GUILayout.Button("⏳ 動き出し待機中...", GUILayout.Width(150), GUILayout.Height(30));
-            }
+            GUI.backgroundColor = new Color(1f, 0.7f, 0f); 
+            GUILayout.Button(standbyTimer < standbyDelay ? "🔄 IK安定化待ち..." : "⏳ 動き出し待機中...", GUILayout.Width(150), GUILayout.Height(30));
         }
         else
         {
             GUI.backgroundColor = timelineColor;
-            string btnText = isPaused ? "▶ 再生 (Play)" : "⏸ 一時停止 (Pause)";
-            if (GUILayout.Button(btnText, GUILayout.Width(150), GUILayout.Height(30))) isPaused = !isPaused;
+            if (GUILayout.Button(isPaused ? "▶ 再生 (Play)" : "⏸ 一時停止 (Pause)", GUILayout.Width(150), GUILayout.Height(30))) isPaused = !isPaused;
         }
 
         GUI.backgroundColor = new Color(0.8f, 0.8f, 0.8f);
-        if (GUILayout.Button("🔄 リセット(待機へ)", GUILayout.Width(130), GUILayout.Height(30)))
-        {
-            ResetStandby();
-        }
+        if (GUILayout.Button("🔄 リセット(待機へ)", GUILayout.Width(130), GUILayout.Height(30))) ResetStandby();
         GUI.backgroundColor = originalColor;
         GUILayout.EndHorizontal();
 
         GUILayout.Space(5);
-
-        GUILayout.BeginHorizontal();
-        GUIStyle labelStyle = new GUIStyle(GUI.skin.label) { richText = true, fontStyle = FontStyle.Bold, fontSize = 14 };
-        GUILayout.Label(" <b>再生速度:</b> " + playSpeed.ToString("F1") + "x  |  <b>平均ズレ:</b> <color=yellow>" + currentAverageError.ToString("F1") + "°</color>", labelStyle);
-        GUILayout.EndHorizontal();
-
-        bool hasActiveBone = false;
-        foreach (var b in targetBones) { if (b.isActive) hasActiveBone = true; }
-
-        if (targetBones.Count == 0 || !hasActiveBone)
-        {
-            GUIStyle warningStyle = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12 };
-            GUILayout.Label("<color=orange>⚠ 計測対象の骨が登録されていないか、すべてチェックが外れています！</color>", warningStyle);
-        }
+        GUILayout.Label($" <b>再生速度:</b> {playSpeed:F1}x  |  <b>平均ズレ:</b> <color=yellow>{currentAverageError:F1} cm</color>", new GUIStyle(GUI.skin.label) { richText = true, fontStyle = FontStyle.Bold, fontSize = 14 });
 
         playSpeed = GUILayout.HorizontalSlider(playSpeed, 0.1f, 2f);
         GUILayout.Space(10);
 
         GUIStyle subLabelStyle = new GUIStyle(GUI.skin.label) { richText = true };
-        GUILayout.Label("<b>【シークバー】</b> " + virtualTime.ToString("F1") + "s / " + maxRecordedTime.ToString("F1") + "s", subLabelStyle);
+        GUILayout.Label($"<b>【シークバー】</b> {virtualTime:F1}s / {maxRecordedTime:F1}s", subLabelStyle);
         
         GUI.backgroundColor = timelineColor;
         float sliderVal = GUILayout.HorizontalSlider(virtualTime, 0f, Mathf.Max(0.1f, maxRecordedTime));
         GUI.backgroundColor = originalColor;
 
-        if (Mathf.Abs(sliderVal - virtualTime) > 0.01f)
-        {
-            virtualTime = sliderVal;
-            isPaused = true; 
-            ClearAllTrails(); 
-        }
+        if (Mathf.Abs(sliderVal - virtualTime) > 0.01f) { virtualTime = sliderVal; isPaused = true; ClearAllTrails(); }
 
         GUILayout.Space(10);
-
         GUI.backgroundColor = new Color(1f, 0.5f, 0.5f);
-        if (GUILayout.Button("🔥 最もズレが大きかった「弱点」にジャンプ", GUILayout.Height(30)))
-        {
-            JumpToWorstMoment();
-        }
+        if (GUILayout.Button("🔥 最もズレが大きかった「弱点」にジャンプ", GUILayout.Height(30))) JumpToWorstMoment();
         
-        GUILayout.Space(5);
+        GUILayout.Space(10);
+        enableVoiceReading = GUILayout.Toggle(enableVoiceReading, " 🔊 AIコーチのアドバイスを音声で読み上げる", GUILayout.Height(20));
 
+        GUILayout.Space(5);
         GUI.backgroundColor = new Color(0.2f, 0.8f, 1f); 
         if (GUILayout.Button("💡 現在のポーズについてAIコーチにアドバイスを求める", GUILayout.Height(35)))
         {
             if (aiClient != null)
             {
                 isPaused = true;
-                string strictJapaneseGenre = practiceGenre + "（※注意：必ずすべて日本語で親しみやすく回答してください。英語などの外国語や絵文字・顔文字は絶対に使用しないでください。また、動きの遅れや早さなどの「タイミングのズレ（〇秒など）」については一切言及せず、「角度やポーズのズレ」についてのみアドバイスをしてください。）";
-                aiClient.RequestAdviceFromOutside(strictJapaneseGenre, worstBoneName, Mathf.Round(worstBoneError * 10.0f) / 10.0f, virtualTime);
-            }
-            else
-            {
-                Debug.LogWarning("Ai Clientがアタッチされていません！");
+                string jsonString = GenerateCoachJson(false); 
+                aiClient.RequestAdviceFromJson(jsonString);   
             }
         }
         GUI.backgroundColor = originalColor;
+
+        if (isPaused && hasStarted)
+        {
+            GUILayout.Space(10);
+            GUILayout.Label("<b>【高速化対応・差分＆絶対角度生JSONデータ】</b>", subLabelStyle);
+            string rawJsonText = GenerateCoachJson(false);
+            
+            jsonScrollPos = GUILayout.BeginScrollView(jsonScrollPos, GUILayout.Height(220));
+            GUILayout.TextArea(rawJsonText, new GUIStyle(GUI.skin.textArea) { wordWrap = true }, GUILayout.ExpandHeight(true));
+            GUILayout.EndScrollView();
+        }
 
         GUILayout.EndArea();
     }
 
     private void OnDestroy()
     {
-        foreach (var kvp in originalMaterials)
-        {
-            if (kvp.Key != null) kvp.Key.sharedMaterials = kvp.Value;
-        }
-        if (ghostMaterial != null) Destroy(ghostMaterial);
-        foreach (Material mat in createdMaterials) { if (mat != null) Destroy(mat); }
+        foreach (var kvp in originalMaterials) { if (kvp.Key) kvp.Key.sharedMaterials = kvp.Value; }
+        if (ghostMaterial) Destroy(ghostMaterial);
+        foreach (Material mat in createdMaterials) { if (mat) Destroy(mat); }
     }
+}
+
+// 🌟ここから下の各種データ保存用データクラス群もすべて完全に出力しています
+[System.Serializable]
+public class TaskInfo
+{
+    public string genre;
+    public string motion_phase;
+    public float speed_ratio;
+}
+
+[System.Serializable]
+public class AIBoneData
+{
+    public string boneName;
+    public float errorAngle;  
+    public float currentAngle; 
+}
+
+[System.Serializable]
+public class PostureAnalysis
+{
+    public float average_error;
+    public string critical_error_bone;
+    public float critical_error_angle;
+    public float critical_learner_absolute_angle; 
+    public List<AIBoneData> all_bones_data;
+}
+
+[System.Serializable]
+public class AICoachRequestJSON
+{
+    public TaskInfo task_info;
+    public PostureAnalysis posture_analysis;
 }
