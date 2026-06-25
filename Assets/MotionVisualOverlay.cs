@@ -49,6 +49,25 @@ public class MotionVisualOverlay : MonoBehaviour
     public float movementThreshold = 0.03f; 
     public float standbyDelay = 1.0f;
 
+    [Header("6. タイミング判定の閾値設定")]
+    [Tooltip("お手本より何秒遅れたら「遅すぎる」と判定するか（デフォルト: 0.18秒）")]
+    public float timingLateThreshold = 0.18f;
+    [Tooltip("お手本より何秒早かったら「早すぎる」と判定するか（デフォルト: 0.18秒）")]
+    public float timingEarlyThreshold = 0.18f;
+
+    [Header("★ 技術指導用・タイミング同期設定（100%解決用拡張）")]
+    [Tooltip("【最確実】生徒のタイミングを検知するTransform（右手の骨などを直接ドラッグ＆ドロップしてください）")]
+    public Transform successorKeyEventTransform;
+    [Tooltip("【最確実】お手本のタイミングを検知するTransform（右手の骨などを直接ドラッグ＆ドロップしてください）")]
+    public Transform craftmanKeyEventTransform;
+
+    [Tooltip("上記が空欄の場合のみ、このフォールバック設定から骨を自動取得します")]
+    public HumanBodyBones keyEventBone = HumanBodyBones.RightHand;
+    [Tooltip("基準部位の速度がこの値を超えた瞬間を『決定的な瞬間』とみなす閾値")]
+    public float keyEventVelocityThreshold = 1.0f;
+    [Tooltip("チェックを入れると、生徒とお手本それぞれの現在の秒速をコンソールに表示し続けます（調整用）")]
+    public bool showVelocityLog = true;
+
     private HumanBodyBones[] allBones;
     private readonly HumanBodyBones[] trailBones = new HumanBodyBones[]
     {
@@ -88,7 +107,17 @@ public class MotionVisualOverlay : MonoBehaviour
     private Dictionary<Renderer, Material[]> originalMaterials = new Dictionary<Renderer, Material[]>();
     private List<Material> createdMaterials = new List<Material>();
     private float lastAssignedSpeed = -1f;
-    private Vector2 jsonScrollPos = Vector2.zero;
+
+    // タイミング計算用内部変数
+    private float masterEventTime = -1f;   
+    private float studentEventTime = -1f;  
+    private bool studentEventDetected = false;
+    private Vector3 lastStudentBonePos;
+    private Vector3 lastMasterBonePos;
+
+    // 実際に計測に使用する確定トランスフォーム
+    private Transform actualStudentKeyEventBone;
+    private Transform actualMasterKeyEventBone;
 
     void Start()
     {
@@ -120,9 +149,23 @@ public class MotionVisualOverlay : MonoBehaviour
         if (syncStartOnMovement) { isPaused = false; hasStarted = false; standbyTimer = 0f; }
         else { hasStarted = true; }
 
+        ResolveAndInitializeBones();
+
         StartCoroutine(EndOfFrameLoop());
     }
 
+    private void ResolveAndInitializeBones()
+    {
+        if (successorKeyEventTransform != null) actualStudentKeyEventBone = successorKeyEventTransform;
+        else if (successorAvatar != null) actualStudentKeyEventBone = successorAvatar.GetBoneTransform(keyEventBone);
+
+        if (craftmanKeyEventTransform != null) actualMasterKeyEventBone = craftmanKeyEventTransform;
+        else if (craftmanAvatar != null) actualMasterKeyEventBone = craftmanAvatar.GetBoneTransform(keyEventBone);
+
+        if (actualStudentKeyEventBone != null) lastStudentBonePos = actualStudentKeyEventBone.position;
+        if (actualMasterKeyEventBone != null) lastMasterBonePos = actualMasterKeyEventBone.position;
+    }
+    
     private void RecordInitialPositions()
     {
         initialPositions.Clear();
@@ -137,8 +180,11 @@ public class MotionVisualOverlay : MonoBehaviour
     {
         isPaused = false; hasStarted = !syncStartOnMovement; virtualTime = 0f; maxRecordedTime = 0f;
         poseHistory.Clear(); ClearAllTrails(); currentAverageError = 0f; lastAssignedSpeed = -1f; standbyTimer = 0f; 
+        masterEventTime = -1f; studentEventTime = -1f; studentEventDetected = false;
         if (craftmanAvatar) { craftmanAvatar.Rebind(); craftmanAvatar.speed = 0f; }
         if (craftmanGhost) { craftmanGhost.Rebind(); craftmanGhost.speed = 0f; }
+
+        ResolveAndInitializeBones();
     }
 
     private void ApplyGhostMaterial(Animator ghostAnim)
@@ -185,7 +231,12 @@ public class MotionVisualOverlay : MonoBehaviour
             {
                 standbyTimer += Time.deltaTime; RecordInitialPositions(); return; 
             }
-            if (DetectMovement()) { hasStarted = true; lastAssignedSpeed = -1f; }
+            if (DetectMovement()) 
+            { 
+                hasStarted = true; 
+                lastAssignedSpeed = -1f; 
+                ResolveAndInitializeBones();
+            }
             else return;
         }
 
@@ -206,6 +257,59 @@ public class MotionVisualOverlay : MonoBehaviour
             {
                 virtualTime += Time.deltaTime * playSpeed; maxRecordedTime = virtualTime;
                 SetAnimatorsSpeed(playSpeed); CalculateAverageError(); RecordPoseSnapshot(virtualTime);
+            }
+
+            DetectKeyEvents();
+        }
+    }
+
+    private void DetectKeyEvents()
+    {
+        if (!hasStarted || isPaused) return;
+
+        bool isInitializationPhase = (virtualTime < 0.2f);
+
+        // --- 生徒のキーイベント検知 ---
+        if (actualStudentKeyEventBone != null)
+        {
+            float studentVelocity = Vector3.Distance(actualStudentKeyEventBone.position, lastStudentBonePos) / Time.deltaTime;
+            lastStudentBonePos = actualStudentKeyEventBone.position;
+
+            // 🌟 修正ポイント：現在の閾値と、検知済みかどうかのステータスも一緒に表示する
+            if (showVelocityLog && !isInitializationPhase)
+            {
+                Debug.Log($"<color=yellow>【生徒】速度: {studentVelocity:F2} / 認識している閾値: {keyEventVelocityThreshold:F2} | 検知済フラグ: {studentEventDetected}</color>");
+            }
+
+            if (!studentEventDetected)
+            {
+                if (!isInitializationPhase && studentVelocity > keyEventVelocityThreshold)
+                {
+                    studentEventTime = virtualTime;
+                    studentEventDetected = true;
+                    Debug.Log($"<color=orange>🔥【同期システム】生徒の重要イベント検知: {studentEventTime:F2}秒 (速度: {studentVelocity:F1})</color>");
+                }
+            }
+        }
+
+        // --- お手本（マスター）のキーイベント検知 ---
+        if (actualMasterKeyEventBone != null)
+        {
+            float masterVelocity = Vector3.Distance(actualMasterKeyEventBone.position, lastMasterBonePos) / Time.deltaTime;
+            lastMasterBonePos = actualMasterKeyEventBone.position;
+
+            if (showVelocityLog && !isInitializationPhase)
+            {
+                Debug.Log($"<color=cyan>【お手本】速度: {masterVelocity:F2} / 認識している閾値: {keyEventVelocityThreshold:F2} | 検知済フラグ: {(masterEventTime >= 0f)}</color>");
+            }
+
+            if (masterEventTime < 0f)
+            {
+                if (!isInitializationPhase && masterVelocity > keyEventVelocityThreshold)
+                {
+                    masterEventTime = virtualTime;
+                    Debug.Log($"<color=blue>🔥【同期システム】お手本の重要イベント検知: {masterEventTime:F2}秒 (速度: {masterVelocity:F1})</color>");
+                }
             }
         }
     }
@@ -282,7 +386,6 @@ public class MotionVisualOverlay : MonoBehaviour
         poseHistory.Add(snapshot);
     }
 
-    // 🌟シークバー移動時に強制再計算を走らせる修正を適用
     private void ApplyPoseAtTime(float time)
     {
         if (poseHistory.Count < 10) return;
@@ -319,7 +422,6 @@ public class MotionVisualOverlay : MonoBehaviour
             if (bCG) { bCG.localRotation = closest.rotationsCraftmanGhost[i]; bCG.localPosition = closest.positionsCraftmanGhost[i]; }
         }
 
-        // 🌟ここで再計算を走らせることで、シークバー巻き戻し時もUI数値が完全連動
         CalculateAverageError();
     }
 
@@ -382,6 +484,26 @@ public class MotionVisualOverlay : MonoBehaviour
 
     private string GenerateCoachJson(bool prettyPrint)
     {
+        float timingOffset = 0.0f;
+        string timingStatus = "ジャストタイミング（※完璧なタイミングなので、この件には絶対に言及せず姿勢のみアドバイスすること）";
+
+        if (studentEventDetected && masterEventTime > 0f)
+        {
+            float rawOffset = studentEventTime - masterEventTime;
+            
+            if (rawOffset > timingLateThreshold) 
+            {
+                timingStatus = "あまりにも遅すぎる（ワンテンポ遅い）";
+                timingOffset = rawOffset; // 閾値を超えた時だけ、実際のズレをAIに渡す
+            }
+            else if (rawOffset < -timingEarlyThreshold) 
+            {
+                timingStatus = "あまりにも早すぎる（焦りすぎている）";
+                timingOffset = rawOffset; // 閾値を超えた時だけ、実際のズレをAIに渡す
+            }
+            // 閾値以内の場合は、timingOffsetは0.0のままAIに送信される
+        }
+
         string voiceInstruction = enableVoiceReading ? "（※音声読み上げを行うため、改行は使わず、100文字以内の流暢な一文の日本語で簡潔にアドバイスしてください）" : "（※注意：必ずすべて日本語で回答してください。外国語や絵文字は絶対に使用しないでください。ポーズのズレについて短く指導してください。）";
         string strictInstruction = practiceGenre + voiceInstruction;
 
@@ -397,6 +519,8 @@ public class MotionVisualOverlay : MonoBehaviour
                 critical_error_bone = worstBoneName,
                 critical_error_angle = Mathf.Round(worstBoneError * 10f) / 10f, 
                 critical_learner_absolute_angle = Mathf.Round(worstBoneCurrentAngle * 10f) / 10f, 
+                timing_status = timingStatus,
+                timing_offset = Mathf.Round(timingOffset * 100f) / 100f,
                 all_bones_data = new List<AIBoneData>()
             }
         };
@@ -473,69 +597,67 @@ public class MotionVisualOverlay : MonoBehaviour
 
         GUILayout.Space(5);
         GUI.backgroundColor = new Color(0.2f, 0.8f, 1f); 
+        
         if (GUILayout.Button("💡 現在のポーズについてAIコーチにアドバイスを求める", GUILayout.Height(35)))
         {
             if (aiClient != null)
             {
-                isPaused = true;
-                string jsonString = GenerateCoachJson(false); 
-                aiClient.RequestAdviceFromJson(jsonString);   
+                aiClient.useVoice = enableVoiceReading;
+                string jsonPayload = GenerateCoachJson(false);
+                aiClient.RequestAdviceFromJson(jsonPayload);
+            }
+            else
+            {
+                Debug.LogWarning("VirtualCoachClient (aiClient) がアタッチされていません。");
             }
         }
-        GUI.backgroundColor = originalColor;
 
-        if (isPaused && hasStarted)
-        {
-            GUILayout.Space(10);
-            GUILayout.Label("<b>【高速化対応・差分＆絶対角度生JSONデータ】</b>", subLabelStyle);
-            string rawJsonText = GenerateCoachJson(false);
-            
-            jsonScrollPos = GUILayout.BeginScrollView(jsonScrollPos, GUILayout.Height(220));
-            GUILayout.TextArea(rawJsonText, new GUIStyle(GUI.skin.textArea) { wordWrap = true }, GUILayout.ExpandHeight(true));
-            GUILayout.EndScrollView();
-        }
-
-        GUILayout.EndArea();
+        GUILayout.EndArea(); 
     }
 
     private void OnDestroy()
     {
-        foreach (var kvp in originalMaterials) { if (kvp.Key) kvp.Key.sharedMaterials = kvp.Value; }
-        if (ghostMaterial) Destroy(ghostMaterial);
-        foreach (Material mat in createdMaterials) { if (mat) Destroy(mat); }
+        StopAllCoroutines();
+        foreach (var mat in createdMaterials) if (mat != null) Destroy(mat);
+        if (ghostMaterial != null) Destroy(ghostMaterial);
     }
-}
 
-// 🌟ここから下の各種データ保存用データクラス群もすべて完全に出力しています
-[System.Serializable]
-public class TaskInfo
-{
-    public string genre;
-    public string motion_phase;
-    public float speed_ratio;
-}
+    // ==============================================================================
+    // 📦 シリアライズ用データ構造クラス群
+    // ==============================================================================
+    [System.Serializable]
+    public class AICoachRequestJSON
+    {
+        public TaskInfo task_info;
+        public PostureAnalysis posture_analysis;
+        public int max_characters = 150;
+    }
 
-[System.Serializable]
-public class AIBoneData
-{
-    public string boneName;
-    public float errorAngle;  
-    public float currentAngle; 
-}
+    [System.Serializable]
+    public class TaskInfo
+    {
+        public string genre;
+        public string motion_phase;
+        public float speed_ratio;
+    }
 
-[System.Serializable]
-public class PostureAnalysis
-{
-    public float average_error;
-    public string critical_error_bone;
-    public float critical_error_angle;
-    public float critical_learner_absolute_angle; 
-    public List<AIBoneData> all_bones_data;
-}
+    [System.Serializable]
+    public class PostureAnalysis
+    {
+        public float average_error;
+        public string critical_error_bone;
+        public float critical_error_angle;
+        public float critical_learner_absolute_angle;
+        public string timing_status; 
+        public float timing_offset;
+        public List<AIBoneData> all_bones_data;
+    }
 
-[System.Serializable]
-public class AICoachRequestJSON
-{
-    public TaskInfo task_info;
-    public PostureAnalysis posture_analysis;
+    [System.Serializable]
+    public class AIBoneData
+    {
+        public string boneName;
+        public float errorAngle;
+        public float currentAngle;
+    }
 }
