@@ -103,3 +103,4 @@ if __name__ == '__main__':
     load_coaching_manual()
     print(f"教本ファイル '{MANUAL_FILE}' を読み込みました。")
     app.run(host='127.0.0.1', port=5001, debug=True)
+    
